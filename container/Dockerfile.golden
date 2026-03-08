@@ -1,0 +1,112 @@
+# NanoClaw Golden Image Container
+# Optimized for EV golden image: k3s edge deployment, minimal attack surface
+#
+# Two-tier architecture:
+#   1. This Dockerfile builds the ORCHESTRATOR (src/index.ts) — the single
+#      Node.js process that manages channels, polling, SQLite, and IPC.
+#   2. The orchestrator spawns AGENT CONTAINERS (container/Dockerfile) for
+#      each conversation, using Docker-in-Docker or the host Docker socket.
+#
+# For the golden image, we containerize the orchestrator so it runs as a
+# k3s workload instead of a bare systemd service.
+
+# =============================================================================
+# Stage 1: Build
+# =============================================================================
+FROM node:22-slim AS builder
+
+WORKDIR /app
+
+# Copy package files first for layer caching
+COPY package.json package-lock.json ./
+
+# Install all dependencies (including devDependencies for tsc)
+RUN npm ci
+
+# Copy source and config
+COPY tsconfig.json ./
+COPY src/ ./src/
+
+# Compile TypeScript
+RUN npm run build
+
+# Prune devDependencies for runtime image
+RUN npm ci --omit=dev
+
+# =============================================================================
+# Stage 2: Runtime
+# =============================================================================
+FROM node:22-slim AS runtime
+
+# Install minimal runtime dependencies:
+# - docker-cli: orchestrator spawns agent containers via Docker socket
+# - tini: proper PID 1 signal handling for graceful shutdown
+# - curl: health check probe
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tini \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Docker CLI only (no daemon — we use the host/DinD socket)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    gnupg \
+    && install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends docker-ce-cli \
+    && apt-get purge -y gnupg \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -r nanoclaw && useradd -r -g nanoclaw -m -d /home/nanoclaw -s /bin/bash nanoclaw
+
+WORKDIR /app
+
+# Copy built application from builder
+COPY --from=builder /app/dist/ ./dist/
+COPY --from=builder /app/node_modules/ ./node_modules/
+COPY --from=builder /app/package.json ./
+
+# Copy container directory (agent Dockerfile, agent-runner, skills, build.sh)
+# The orchestrator needs this to build/spawn agent containers
+COPY container/ ./container/
+
+# Copy groups directory skeleton (CLAUDE.md templates)
+COPY groups/ ./groups/
+
+# Create runtime directories with correct ownership
+RUN mkdir -p /app/store /app/data /app/groups \
+    && chown -R nanoclaw:nanoclaw /app/store /app/data /app/groups /home/nanoclaw
+
+# Environment defaults for golden image
+ENV NODE_ENV=production
+ENV LOG_LEVEL=info
+# Assistant name (override via ConfigMap)
+ENV ASSISTANT_NAME=Andy
+# Container image the orchestrator uses to spawn agent containers
+ENV CONTAINER_IMAGE=nanoclaw-agent:latest
+# Limit concurrent agent containers for edge hardware
+ENV MAX_CONCURRENT_CONTAINERS=3
+# Reduce idle timeout for resource-constrained environments
+ENV IDLE_TIMEOUT=600000
+
+# Health check: verify the process is running and responsive
+# NanoClaw doesn't expose an HTTP endpoint, so we check the process
+# and that the SQLite DB is accessible
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD test -f /app/store/messages.db && node -e "require('better-sqlite3')('/app/store/messages.db').prepare('SELECT 1').get()" || exit 1
+
+# Expose no ports by default (NanoClaw uses outbound connections only)
+# Channels connect outbound to WhatsApp/Telegram/Discord/Slack APIs
+
+# Use tini as PID 1 for proper signal forwarding (SIGTERM -> graceful shutdown)
+ENTRYPOINT ["tini", "--"]
+
+# Run as non-root
+USER nanoclaw
+
+# Start the orchestrator
+CMD ["node", "dist/index.js"]

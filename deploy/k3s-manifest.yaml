@@ -1,0 +1,191 @@
+# NanoClaw Golden Image - k3s Auto-Deploy Manifest
+# Drop this file into /var/lib/rancher/k3s/server/manifests/ for auto-deployment
+#
+# Architecture notes:
+#   - NanoClaw orchestrator runs as a Deployment (single replica)
+#   - It spawns agent containers via the Docker socket (mounted from host)
+#   - SQLite DB and group data are persisted via hostPath (edge hardware = single node)
+#   - For multi-node clusters, replace hostPath with a proper PVC
+#
+# Prerequisites:
+#   1. The nanoclaw-agent:latest image must be pre-built on the node
+#      (or available from the Gitea registry)
+#   2. Docker socket must be accessible (k3s uses containerd, but NanoClaw
+#      needs Docker for its agent containers — install Docker CE alongside k3s)
+#   3. Channel credentials must be provided via the nanoclaw-secrets Secret
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nanoclaw
+  labels:
+    app.kubernetes.io/name: nanoclaw
+    app.kubernetes.io/part-of: ev-golden-image
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nanoclaw-config
+  namespace: nanoclaw
+  labels:
+    app.kubernetes.io/name: nanoclaw
+data:
+  # Assistant identity
+  ASSISTANT_NAME: "Andy"
+  # Logging
+  LOG_LEVEL: "info"
+  # Container limits for edge hardware
+  MAX_CONCURRENT_CONTAINERS: "2"
+  # Agent container image (pre-built on node or pulled from registry)
+  CONTAINER_IMAGE: "nanoclaw-agent:latest"
+  # Reduce idle timeout for constrained hardware (10 minutes)
+  IDLE_TIMEOUT: "600000"
+  # Container timeout (15 minutes)
+  CONTAINER_TIMEOUT: "900000"
+  # Timezone (override per-deployment)
+  TZ: "America/New_York"
+
+---
+# Secrets placeholder — populate with actual channel credentials
+# For the golden image, this starts empty (no channels configured)
+# Users add credentials via: kubectl create secret generic nanoclaw-secrets -n nanoclaw --from-literal=KEY=VALUE
+#
+# Supported keys (add only what you need):
+#   ANTHROPIC_API_KEY          - Required for Claude API access
+#   CLAUDE_CODE_OAUTH_TOKEN    - Alternative auth via OAuth
+#   ANTHROPIC_BASE_URL         - Custom API endpoint (for local models)
+#   ANTHROPIC_AUTH_TOKEN        - Custom auth token
+#
+# Channel credentials are added by skills (/add-whatsapp, /add-telegram, etc.)
+# and stored in .env — for k3s, mount them as secrets instead.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nanoclaw-secrets
+  namespace: nanoclaw
+  labels:
+    app.kubernetes.io/name: nanoclaw
+type: Opaque
+data: {}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nanoclaw
+  namespace: nanoclaw
+  labels:
+    app.kubernetes.io/name: nanoclaw
+    app.kubernetes.io/component: orchestrator
+spec:
+  replicas: 1
+  # NanoClaw uses SQLite — only one replica can safely write
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nanoclaw
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nanoclaw
+        app.kubernetes.io/component: orchestrator
+    spec:
+      # Run as the nanoclaw user (UID 999 from Dockerfile)
+      securityContext:
+        fsGroup: 999
+      containers:
+        - name: nanoclaw
+          image: git.escape-velocity-ventures.org/ev/nanoclaw:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: nanoclaw-config
+            - secretRef:
+                name: nanoclaw-secrets
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          volumeMounts:
+            # Persistent storage for SQLite DB
+            - name: store
+              mountPath: /app/store
+            # Persistent storage for runtime data (sessions, IPC)
+            - name: data
+              mountPath: /app/data
+            # Persistent storage for group memories
+            - name: groups
+              mountPath: /app/groups
+            # Docker socket for spawning agent containers
+            - name: docker-socket
+              mountPath: /var/run/docker.sock
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "test -f /app/store/messages.db && node -e \"require('better-sqlite3')('/app/store/messages.db').prepare('SELECT 1').get()\""
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - "test -f /app/store/messages.db"
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+      volumes:
+        # For single-node edge hardware, hostPath is appropriate.
+        # For multi-node: replace with PersistentVolumeClaim.
+        - name: store
+          hostPath:
+            path: /var/lib/nanoclaw/store
+            type: DirectoryOrCreate
+        - name: data
+          hostPath:
+            path: /var/lib/nanoclaw/data
+            type: DirectoryOrCreate
+        - name: groups
+          hostPath:
+            path: /var/lib/nanoclaw/groups
+            type: DirectoryOrCreate
+        - name: docker-socket
+          hostPath:
+            path: /var/run/docker.sock
+            type: Socket
+      # Graceful shutdown: give NanoClaw time to stop agent containers
+      terminationGracePeriodSeconds: 30
+      # Schedule on nodes with Docker available
+      nodeSelector:
+        kubernetes.io/os: linux
+
+---
+# Service is optional — NanoClaw is outbound-only.
+# Included for potential future HTTP health/metrics endpoint.
+apiVersion: v1
+kind: Service
+metadata:
+  name: nanoclaw
+  namespace: nanoclaw
+  labels:
+    app.kubernetes.io/name: nanoclaw
+spec:
+  selector:
+    app.kubernetes.io/name: nanoclaw
+  ports:
+    # Placeholder for future health/metrics endpoint
+    - name: health
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+  type: ClusterIP

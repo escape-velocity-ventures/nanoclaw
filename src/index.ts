@@ -526,8 +526,7 @@ async function main(): Promise<void> {
     await channel.connect();
   }
   if (channels.length === 0) {
-    logger.fatal('No channels connected');
-    process.exit(1);
+    logger.warn('No channels connected — NanoClaw is running but idle. Add channels via /add-whatsapp, /add-telegram, etc.');
   }
 
   // Start subsystems (independently of connection handler)
