@@ -38,12 +38,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Gitea registry
+        if: ${{ secrets.GITEA_TOKEN != '' }}
+        continue-on-error: true
         run: |
           echo "${{ secrets.GITEA_TOKEN }}" | docker login "${{ env.GITEA_REGISTRY }}" \
             -u "${{ secrets.GITEA_USERNAME }}" --password-stdin
 
       # ── Orchestrator image (Dockerfile.golden) ─────────────────────────
-      - name: Build and push orchestrator image
+      - name: Build and push orchestrator image (GHCR)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -53,13 +55,11 @@ jobs:
           tags: |
             ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_ORG }}/nanoclaw:${{ inputs.version }}
             ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_ORG }}/nanoclaw:latest
-            ${{ env.GITEA_REGISTRY }}/${{ env.GITEA_ORG }}/nanoclaw:${{ inputs.version }}
-            ${{ env.GITEA_REGISTRY }}/${{ env.GITEA_ORG }}/nanoclaw:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       # ── Agent image (Dockerfile) ──────────────────────────────────────
-      - name: Build and push agent image
+      - name: Build and push agent image (GHCR)
         uses: docker/build-push-action@v6
         with:
           context: container
@@ -69,10 +69,20 @@ jobs:
           tags: |
             ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_ORG }}/nanoclaw-agent:${{ inputs.version }}
             ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_ORG }}/nanoclaw-agent:latest
-            ${{ env.GITEA_REGISTRY }}/${{ env.GITEA_ORG }}/nanoclaw-agent:${{ inputs.version }}
-            ${{ env.GITEA_REGISTRY }}/${{ env.GITEA_ORG }}/nanoclaw-agent:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # ── Gitea mirror (optional — only if secrets are configured) ─────
+      - name: Push to Gitea registry
+        if: ${{ secrets.GITEA_TOKEN != '' }}
+        continue-on-error: true
+        run: |
+          docker buildx imagetools create \
+            --tag ${{ env.GITEA_REGISTRY }}/${{ env.GITEA_ORG }}/nanoclaw:${{ inputs.version }} \
+            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_ORG }}/nanoclaw:${{ inputs.version }}
+          docker buildx imagetools create \
+            --tag ${{ env.GITEA_REGISTRY }}/${{ env.GITEA_ORG }}/nanoclaw-agent:${{ inputs.version }} \
+            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_ORG }}/nanoclaw-agent:${{ inputs.version }}
 
       # ── GitHub Release ────────────────────────────────────────────────
       - name: Create GitHub Release
@@ -86,8 +96,6 @@ jobs:
             Container images published to:
             - `ghcr.io/escape-velocity-ventures/nanoclaw:${{ inputs.version }}`
             - `ghcr.io/escape-velocity-ventures/nanoclaw-agent:${{ inputs.version }}`
-            - `git.escape-velocity-ventures.org/ev/nanoclaw:${{ inputs.version }}`
-            - `git.escape-velocity-ventures.org/ev/nanoclaw-agent:${{ inputs.version }}`
 
             Platforms: `linux/amd64`, `linux/arm64`
           generate_release_notes: true
