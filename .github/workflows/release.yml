@@ -38,11 +38,14 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Gitea registry
-        if: ${{ secrets.GITEA_TOKEN != '' }}
         continue-on-error: true
         run: |
-          echo "${{ secrets.GITEA_TOKEN }}" | docker login "${{ env.GITEA_REGISTRY }}" \
-            -u "${{ secrets.GITEA_USERNAME }}" --password-stdin
+          if [ -n "${{ secrets.GITEA_TOKEN }}" ]; then
+            echo "${{ secrets.GITEA_TOKEN }}" | docker login "${{ env.GITEA_REGISTRY }}" \
+              -u "${{ secrets.GITEA_USERNAME }}" --password-stdin
+          else
+            echo "GITEA_TOKEN not configured — skipping Gitea registry login"
+          fi
 
       # ── Orchestrator image (Dockerfile.golden) ─────────────────────────
       - name: Build and push orchestrator image (GHCR)
@@ -74,7 +77,6 @@ jobs:
 
       # ── Gitea mirror (optional — only if secrets are configured) ─────
       - name: Push to Gitea registry
-        if: ${{ secrets.GITEA_TOKEN != '' }}
         continue-on-error: true
         run: |
           docker buildx imagetools create \
