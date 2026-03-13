@@ -1,0 +1,23 @@
+name: AI Code Review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  ai-review:
+    uses: escape-velocity-ventures/workflow-templates/.github/workflows/reusable-ai-review.yml@d4349f503494533b77818426c826bc6a3aab64ab
+    with:
+      fail-on-warnings: false
+      require-general-pass: false
+      constrain-to-prior-findings: true
+      review-provider-order: anthropic,openai,xai
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+      TINKERBELLE_APP_ID: ${{ secrets.TINKERBELLE_APP_ID }}
+      TINKERBELLE_APP_PRIVATE_KEY: ${{ secrets.TINKERBELLE_APP_PRIVATE_KEY }}
